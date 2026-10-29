@@ -330,6 +330,10 @@ class SessionDisplay:
         self.chrome_proc: subprocess.Popen | None = None
         self.xterm_procs: dict[str, subprocess.Popen] = {}
         self._dbus_pid: int = 0
+        # D-Bus session bus env (DBUS_SESSION_BUS_ADDRESS/PID) created in
+        # start(). Chrome's fcitx GTK IM module needs the address to reach
+        # the fcitx5 daemon — without it, Shift+Space toggles nothing.
+        self._fcitx_env: dict[str, str] = {}
 
     # -- Public API -----------------------------------------------------------
 
@@ -399,8 +403,17 @@ class SessionDisplay:
                         if k in ("DBUS_SESSION_BUS_ADDRESS", "DBUS_SESSION_BUS_PID"):
                             fcitx_env[k] = v
                 self._dbus_pid = int(fcitx_env.get("DBUS_SESSION_BUS_PID", "0"))
+                # Persist the bus env so _launch_chrome (and restarts) can
+                # hand DBUS_SESSION_BUS_ADDRESS to Chrome — os.environ of the
+                # server process never sees the per-session dbus-launch bus.
+                self._fcitx_env = {
+                    k: fcitx_env[k]
+                    for k in ("DBUS_SESSION_BUS_ADDRESS", "DBUS_SESSION_BUS_PID")
+                    if k in fcitx_env
+                }
 
                 # 3. Configure and start fcitx5 input method daemon
+                self._ensure_fcitx5_profile()
                 self.fcitx_proc = subprocess.Popen(
                     ["fcitx5", "-d"],
                     env=fcitx_env,
@@ -548,12 +561,30 @@ class SessionDisplay:
         profile_dir = STATE_DIR / "chrome_profiles" / self.session_id
         profile_dir.mkdir(parents=True, exist_ok=True)
 
+        # Chrome's ProcessSingleton leaves SingletonLock/Cookie/Socket in
+        # the profile dir. The lock is a symlink to "<hostname>:<pid>"; when
+        # the container is recreated the hostname changes, so the stale lock
+        # from the previous container makes Chrome exit immediately ("profile
+        # appears to be in use"). This profile is owned exclusively by
+        # SessionDisplay (chrome_proc tracked under _LOCK), so any leftover
+        # singleton files are always stale — remove them before launch.
+        for sub in ("", "Default"):
+            for name in ("SingletonLock", "SingletonCookie", "SingletonSocket"):
+                try:
+                    (profile_dir / sub / name).unlink(missing_ok=True)
+                except OSError:
+                    pass
+
         chrome_env = {
             **os.environ,
             "DISPLAY": f":{self.display_num}",
             "GTK_IM_MODULE": "fcitx",
             "QT_IM_MODULE": "fcitx",
             "XMODIFIERS": "@im=fcitx",
+            # fcitx's GTK IM module finds the fcitx5 daemon over the session
+            # bus. The bus is per-session (dbus-launch in start()), so it is
+            # not in os.environ — pass it explicitly or IME never engages.
+            **self._fcitx_env,
         }
         # Remove XDG_CONFIG_HOME to avoid interfering with fcitx config
         chrome_env.pop("XDG_CONFIG_HOME", None)
@@ -694,6 +725,54 @@ class SessionDisplay:
         # path; runtime callers should not assume it survives.
         json_path.parent.mkdir(parents=True, exist_ok=True)
         json_path.write_text(json.dumps(config))
+
+    @staticmethod
+    def _ensure_fcitx5_profile() -> None:
+        """Ensure the fcitx5 profile includes the Pinyin input method.
+
+        fcitx5's first-run default profile is keyboard-only; with no IM in
+        the group, the configured trigger key (Shift+Space) toggles nothing
+        observable. Seeds a keyboard-us + pinyin profile when the file is
+        missing, or when it only contains keyboard-* entries (the pristine
+        default). Any profile that already lists a non-keyboard IM is
+        user-owned and left untouched. Must run BEFORE fcitx5 starts —
+        the daemon saves its in-memory profile on exit and would clobber
+        a file written while it runs.
+        """
+        profile = Path.home() / ".config" / "fcitx5" / "profile"
+        try:
+            text = profile.read_text(encoding="utf-8") if profile.is_file() else ""
+        except OSError:
+            text = ""
+        if "Name=pinyin" in text:
+            return
+        for line in text.splitlines():
+            name = line.strip()
+            if name.startswith("Name=") and not name.startswith("Name=keyboard-"):
+                return  # user added a custom IM — do not touch
+        try:
+            profile.parent.mkdir(parents=True, exist_ok=True)
+            profile.write_text(
+                "[Groups/0]\n"
+                "Name=Default\n"
+                "Default Layout=us\n"
+                "DefaultIM=pinyin\n"
+                "\n"
+                "[Groups/0/Items/0]\n"
+                "Name=keyboard-us\n"
+                "Layout=\n"
+                "\n"
+                "[Groups/0/Items/1]\n"
+                "Name=pinyin\n"
+                "Layout=\n"
+                "\n"
+                "[GroupOrder]\n"
+                "0=Default\n",
+                encoding="utf-8",
+            )
+            logger.info("fcitx5 profile seeded with pinyin (%s)", profile)
+        except OSError as exc:
+            logger.warning("fcitx5 profile seed failed: %s", exc)
 
     @staticmethod
     def _configure_fcitx5_trigger_key(fcitx_env: dict) -> None:

@@ -154,7 +154,15 @@ RUN apt-get update -y --fix-missing --no-install-recommends \
         libatomic1 xz-utils build-essential \
         xvfb x11vnc openbox wmctrl xterm \
         fcitx5 fcitx5-chinese-addons fcitx5-frontend-gtk3 fcitx5-frontend-gtk4 \
+        fcitx5-config-qt \
         dbus-x11 python3-dbus \
+        fonts-wqy-microhei \
+    # fcitx5-config-qt ships two desktop entries with the same visible name
+    # "Fcitx 5 Configuration" (fcitx5-configtool.desktop and
+    # org.fcitx.fcitx5-config-qt.desktop). openbox's obamenu ignores the
+    # latter's NoDisplay=true, so both appear under Applications — keep only
+    # the canonical fcitx5-configtool entry.
+    && rm -f /usr/share/applications/org.fcitx.fcitx5-config-qt.desktop \
     && apt-get upgrade -y \
     && apt-get clean \
     && rm -rf /var/lib/apt/lists/*
