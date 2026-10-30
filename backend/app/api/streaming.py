@@ -70,12 +70,10 @@ def _truncate_tool_output(text, max_chars: int = _MAX_TOOL_OUTPUT_CHARS):
 _CANCEL_EVENTS: dict = {}
 
 
-# Sentinel CDP URL written to os.environ when a SessionDisplay-managed Chrome
-# is available.  agent-browser-wrapper.sh detects this value and resolves the
-# real CDP URL from ~/.hermes/webui/sessions_display/<sid>.json.  Using a
-# constant sentinel makes the env-var immune to cross-session races: every
-# SessionDisplay session writes the same value, so overwriting is harmless.
-CDP_URL_SENTINEL = "http://127.0.0.1:19999"
+# NOTE: BROWSER_CDP_URL is no longer written to os.environ here (nor is the
+# old 19999 sentinel). Per-session CDP endpoints ride the ContextVar overrides
+# in app.compat.env_overrides; the shared sentinel constant lives in
+# app.compat.browser_cdp (still honored there for backward compatibility).
 
 # Lazy import to avoid circular deps -- hermes-agent is on sys.path via api/config.py
 try:
@@ -518,12 +516,19 @@ def _resolve_session_cdp_port(session_id: str) -> int | None:
     from app.api.session_display import SessionDisplay, _DISPLAYS
     info = SessionDisplay.get_info(session_id)
     if not info:
+        logger.debug("[cdp-resolve] session=%s -> None (no config JSON)", session_id)
         return None
     # Ensure Chrome is alive; restart if it was closed
     sd = _DISPLAYS.get(session_id)
     if sd and not sd.check_chrome_alive():
+        logger.debug("[cdp-resolve] session=%s -> None (chrome not alive)", session_id)
         return None
-    return info.get("cdp_port")
+    port = info.get("cdp_port")
+    logger.debug(
+        "[cdp-resolve] session=%s -> %s (sd_registered=%s)",
+        session_id, port, sd is not None,
+    )
+    return port
 
 
 def _resolve_personality_prompt(config_dict, personality_name):
@@ -976,6 +981,22 @@ def _run_agent_streaming(session_id, msg_text, model, workspace, stream_id, atta
             cron_session="",
         )
 
+        # Pinned sessions additionally strip proxy vars from the session
+        # env: agent-browser's HTTP client ignores NO_PROXY and routes ALL
+        # connections through HTTP_PROXY, including 127.0.0.1 CDP. A None
+        # override value removes the key in _IsolatedPopen.
+        _proxy_unset = (
+            dict(HTTP_PROXY=None, HTTPS_PROXY=None,
+                 http_proxy=None, https_proxy=None)
+            if _cdp_port else {}
+        )
+        # NOTE: BROWSER_CDP_URL is deliberately NOT injected here — neither
+        # into this override dict nor into the global os.environ. The single
+        # source of truth for a session's CDP endpoint is its display config
+        # ($HERMES_WEBUI_STATE_DIR/sessions_display/<session_id>.json):
+        # in-process SDK readers get it via the app.compat.browser_cdp patch
+        # (session id → JSON), and the agent-browser wrapper resolves the
+        # same JSON from HERMES_SESSION_KEY in the child env.
         _set_thread_env(
             TERMINAL_CWD=str(s.workspace),
             HERMES_EXEC_ASK='1',
@@ -983,52 +1004,20 @@ def _run_agent_streaming(session_id, msg_text, model, workspace, stream_id, atta
             HERMES_UI_SESSION_ID=session_id,
             HERMES_HOME=_profile_home,
             HERMES_GATEWAY_SESSION='1',
-            BROWSER_CDP_URL=(f"http://127.0.0.1:{_cdp_port}" if _cdp_port else ''),
+            **_proxy_unset,
         )
         # ── os.environ mutation (under global lock) ──────────────────────
-        # _IsolatedPopen (activated by _set_thread_env above) protects
-        # subprocesses from cross-session env races via thread-local
-        # overrides.  We still write to os.environ for two reasons:
-        #   1. Python in-process consumers (browser_tool._get_cdp_override)
-        #      that read os.environ directly.
-        #   2. Subprocesses spawned by code that constructs an explicit
-        #      env=... dict from os.environ *before* calling Popen — those
-        #      snapshots happen after our writes, so the values must be
-        #      correct here.
+        # BROWSER_CDP_URL is never written to the global os.environ (see the
+        # note above); the global key is left entirely to the user (CLI
+        # /browser connect). No session code writes, deletes, or restores it.
         with _ENV_LOCK:
             old_cwd = os.environ.get('TERMINAL_CWD')
             old_exec_ask = os.environ.get('HERMES_EXEC_ASK')
             old_gateway_session = os.environ.get('HERMES_GATEWAY_SESSION')
             old_hermes_home = os.environ.get('HERMES_HOME')
-            old_cdp_url = os.environ.get('BROWSER_CDP_URL')
-            old_http_proxy = os.environ.get('HTTP_PROXY')
-            old_https_proxy = os.environ.get('HTTPS_PROXY')
             os.environ['TERMINAL_CWD'] = str(s.workspace)
             os.environ['HERMES_EXEC_ASK'] = '1'
             os.environ['HERMES_GATEWAY_SESSION'] = '1'
-            # BROWSER_CDP_URL: set the real CDP URL so Python browser_tool and
-            # agent-browser both connect directly to SessionDisplay's Chrome.
-            # If a global CDP URL is already set (e.g. via CLI /browser connect),
-            # keep it — a real user-configured value must not be overwritten.
-            # agent-browser's HTTP client ignores NO_PROXY and routes ALL
-            # connections through HTTP_PROXY, including 127.0.0.1 CDP. Clear
-            # proxy vars so agent-browser reaches CDP directly.
-            _real_cdp = f"http://127.0.0.1:{_cdp_port}" if _cdp_port else ""
-            _existing_cdp = os.environ.get('BROWSER_CDP_URL', '').strip()
-            if _cdp_port:
-                if not _existing_cdp or _existing_cdp == CDP_URL_SENTINEL:
-                    os.environ['BROWSER_CDP_URL'] = _real_cdp
-                    old_http_proxy = os.environ.pop('HTTP_PROXY', None)
-                    old_https_proxy = os.environ.pop('HTTPS_PROXY', None)
-                    os.environ.pop('http_proxy', None)
-                    os.environ.pop('https_proxy', None)
-                # else: global real CDP URL exists — keep it, don't overwrite
-            elif _existing_cdp == CDP_URL_SENTINEL or (
-                _existing_cdp.startswith("http://127.0.0.1:")
-                and not _existing_cdp.endswith(":19999")
-            ):
-                # SessionDisplay gone but sentinel lingers from a prior run
-                del os.environ['BROWSER_CDP_URL']
             if _profile_home:
                 os.environ['HERMES_HOME'] = _profile_home
         # Lock released — agent runs without holding it
@@ -2607,17 +2596,8 @@ def _run_agent_streaming(session_id, msg_text, model, workspace, stream_id, atta
                 else: os.environ['HERMES_GATEWAY_SESSION'] = old_gateway_session
                 if old_hermes_home is None: os.environ.pop('HERMES_HOME', None)
                 else: os.environ['HERMES_HOME'] = old_hermes_home
-                try:
-                    if old_cdp_url is None:
-                        os.environ.pop('BROWSER_CDP_URL', None)
-                    else:
-                        os.environ['BROWSER_CDP_URL'] = old_cdp_url
-                    if old_http_proxy is not None:
-                        os.environ['HTTP_PROXY'] = old_http_proxy
-                    if old_https_proxy is not None:
-                        os.environ['HTTPS_PROXY'] = old_https_proxy
-                except NameError:
-                    pass
+                # BROWSER_CDP_URL / proxies: never mutated globally anymore
+                # (see the turn-start comment) — nothing to restore.
             # Clear per-thread session context (ContextVar)
             try:
                 clear_session_vars(_session_ctx_tokens)

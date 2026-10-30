@@ -371,6 +371,15 @@ def main() -> None:
         _HERMES_FOUND,
     )
 
+    # Install SDK compat patches before any prewarm thread snapshots tool
+    # definitions (their check_fns call browser_tool._get_cdp_override_raw).
+    try:
+        from app.compat import install as _install_compat_patches
+        _install_compat_patches()
+    except Exception:
+        logger.warning('compat: SDK CDP override patch install failed',
+                       exc_info=True)
+
     # ── Banner ──
 
     # ── Stage 1: Load config ──

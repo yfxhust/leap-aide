@@ -86,14 +86,15 @@ def on_tool_started(session_id: str, name: str, args: dict | None, tid: str) -> 
 
     try:
         tmpf = tempfile.NamedTemporaryFile(
-            mode="w", prefix=f"hermes-xterm-{tid[:8]}-", suffix=".out",
+            mode="w", encoding="utf-8",
+            prefix=f"hermes-xterm-{tid[:8]}-", suffix=".out",
             delete=False,
         )
         tmpf.write(content)
         tmpf.flush()
         tmpf_path = tmpf.name
         _xterm_outputs[tid] = tmpf_path
-    except OSError:
+    except (OSError, UnicodeError):
         tmpf_path = "/dev/null"
 
     try:
@@ -110,7 +111,15 @@ def on_tool_started(session_id: str, name: str, args: dict | None, tid: str) -> 
                 "-e", "sh", "-c",
                 f"tail -n +1 -f {tmpf_path}",
             ],
-            env={**os.environ, "DISPLAY": f":{display}"},
+            # C.UTF-8 overrides the container's LC_ALL=C so xterm enables
+            # UTF-8 mode — otherwise CJK tool output renders as mojibake.
+            # C.UTF-8 is built into glibc (no locale-gen dependency).
+            env={
+                **os.environ,
+                "DISPLAY": f":{display}",
+                "LANG": "C.UTF-8",
+                "LC_ALL": "C.UTF-8",
+            },
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
         )
@@ -146,7 +155,7 @@ def on_tool_completed(
 
     if tmpf_path:
         try:
-            with open(tmpf_path, "a") as f:
+            with open(tmpf_path, "a", encoding="utf-8") as f:
                 f.write(f"\n--- Result ---\n")
                 f.write(output_text)
                 f.write(f"\n\n--- Status ---\n")

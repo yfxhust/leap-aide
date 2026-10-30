@@ -133,6 +133,57 @@ def test_pinned_persists_on_reload():
             post("/api/session/delete", {"session_id": sid})
 
 
+def test_pin_preserves_restricted_skills():
+    """Pin/unpin must not mutate a user-curated skills list.
+
+    The x-session-browser skill is globally visible once installed and
+    gates itself to pinned sessions via its own prerequisites; pin must
+    not silently add it to (or remove it from) a restricted list — the
+    list is explicit user intent.
+    """
+    created = []
+    try:
+        sid, _ = make_session(created)
+        d, status = post("/api/session/skills",
+                         {"session_id": sid, "skills": ["demo"]})
+        assert status == 200, d
+
+        d, status = post_with_timeout("/api/session/pin",
+                                      {"session_id": sid, "pinned": True})
+        assert status == 200
+        assert d['session']['skills'] == ["demo"], d['session']
+
+        # Persisted: reload from disk still sees the original list.
+        d, _ = get(f"/api/session?session_id={sid}")
+        assert d['session']['skills'] == ["demo"]
+
+        # Unpin leaves the list untouched as well.
+        d, status = post_with_timeout("/api/session/pin",
+                                      {"session_id": sid, "pinned": False})
+        assert status == 200
+        assert d['session']['skills'] == ["demo"], d['session']
+    finally:
+        for sid in created:
+            post("/api/session/delete", {"session_id": sid})
+
+
+def test_pin_keeps_none_skills_as_none():
+    """Pin leaves skills=None (all skills) untouched.
+
+    None means "all skills available" — no merge is needed.
+    """
+    created = []
+    try:
+        sid, _ = make_session(created)
+        d, status = post_with_timeout("/api/session/pin",
+                                      {"session_id": sid, "pinned": True})
+        assert status == 200
+        assert d['session']['skills'] is None, d['session']
+    finally:
+        for sid in created:
+            post("/api/session/delete", {"session_id": sid})
+
+
 # ── Session Import ────────────────────────────────────────────────────────
 
 def test_import_session_basic():

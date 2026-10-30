@@ -346,6 +346,8 @@ export const useSessionStore = create<SessionState>((set, get) => ({
         body: JSON.stringify({ session_id: id, pinned }),
         credentials: 'include',
       });
+      // Pin/unpin only flips the pinned flag server-side — the session's
+      // skills list is never mutated, so local state just mirrors `pinned`.
       set((state) => ({
         sessions: state.sessions.map((s) =>
           s.session_id === id ? { ...s, pinned } : s

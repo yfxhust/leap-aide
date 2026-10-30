@@ -2419,6 +2419,9 @@ def handle_post(handler, parsed) -> bool:
             s = get_session(body["session_id"])
         except KeyError:
             return bad(handler, "Session not found", 404)
+        # The x-session-browser skill is globally visible once installed;
+        # its own prerequisites gate usage to pinned sessions. Pin/unpin
+        # must not mutate a user-curated skills list.
         with _get_session_agent_lock(body["session_id"]):
             s.pinned = bool(body.get("pinned", True))
             s.sync_webui_metadata()

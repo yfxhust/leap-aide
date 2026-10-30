@@ -1,0 +1,35 @@
+# Bilingual-pair consistency record for SKILL.md / SKILL.zh-CN.md.
+# Per heading-slug section: sha256-16 of prose outside code blocks.
+# Editing EITHER side requires aligning the OTHER side first, then
+# re-recording:
+#   python3 backend/scripts/check_translation_pairing.py --write skills/leap-aide/x-session-browser/SKILL.md
+/:
+  en: fb59a7ff86238ade
+  zh: bc283b0172f74856
+/x-session-browser-skill:
+  en: d7aee91edfa20d23
+  zh: f891418833c4def8
+/when-to-use:
+  en: 2c31a2d472ed288b
+  zh: cf9860d47b09b1dd
+/prerequisites:
+  en: 6bc907a84279d017
+  zh: 78e2dafde64521df
+/how-to-run:
+  en: 87b9c95e6acc166d
+  zh: bb024149d80deca5
+/quick-reference:
+  en: 9e300612fb6c3f65
+  zh: cc0db9b53920ceaf
+/procedure:
+  en: e3b0c44298fc1c14
+  zh: e3b0c44298fc1c14
+/pinned-session:
+  en: 6d848d39e2d8dbf5
+  zh: 6d4c8302120e4ed3
+/regular-session:
+  en: 942ddc751331221c
+  zh: dedeb58dfb51a6c8
+/pitfalls:
+  en: f73cfdda2a6a18bf
+  zh: a948adb0eb4beea4

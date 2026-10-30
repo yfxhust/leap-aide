@@ -8,43 +8,54 @@
 #
 # ── CDP URL resolution (SessionDisplay integration) ────────────────────────
 #
-# When BROWSER_CDP_URL is the sentinel value "http://127.0.0.1:19999", this
-# wrapper resolves the real CDP URL from the per-session display config:
-#   ~/.hermes/webui/sessions_display/<HERMES_SESSION_KEY>.json
+# Policy: pure pass-through, with ONE exception — when this session's
+# display config exists (pinned session). A pinned session's browser
+# desktop is the only legitimate attach target, so the wrapper strips
+# any caller-supplied --cdp / --session and injects the config's
+# cdp_url. Everything else is deliberately none of the wrapper's
+# business: whether an unpinned session may touch desktop resources at
+# all is gated by the terminal approval patterns
+# (app.compat.desktop_guard / BROWSER_DESKTOP_BLOCK_STRATEGY), not by
+# argument rewriting here. The wrapper does not read that variable —
+# under strategy=off an unpinned session's --cdp really does go
+# through, which is the point of "fully open".
 #
-# This sentinel mechanism is immune to cross-session os.environ races: every
-# SessionDisplay session writes the *same* sentinel value, so concurrent
-# overwrites are harmless.  The real CDP port is read from the session's own
-# JSON file, which is session-granular and race-free.
+# The single source of truth for a pinned session's CDP endpoint is its
+# display config, written by SessionDisplay at pin time and deleted at
+# unpin:
+#   ~/.hermes/webui/sessions_display/<session_id>.json
 #
-# Precedence:
-#   1. Global BROWSER_CDP_URL (non-sentinel) — e.g. CLI /browser connect
-#   2. SessionDisplay JSON (when sentinel is set)
-#   3. Neither — passthrough (agent-browser uses its default logic)
+# LeapAide never injects BROWSER_CDP_URL into the child env — this wrapper
+# resolves the endpoint straight from the session's own JSON via
+# HERMES_SESSION_KEY (injected per-session by _IsolatedPopen), so there
+# is no env copy that can race or go stale across concurrent sessions.
 
 set -euo pipefail
 
-# ── Sentinel CDP URL resolution ────────────────────────────────────────────
-SENTINEL="http://127.0.0.1:19999"
+# ── Session-display JSON resolution ────────────────────────────────────────
 SESSIONS_DIR="${HOME}/.hermes/webui/sessions_display"
-# Extract session_id from HERMES_SESSION_KEY (strip "agent:main:webui:dm:" prefix)
-SID="${HERMES_SESSION_KEY##*:}"
+# Extract session_id from HERMES_SESSION_KEY (strip "agent:main:webui:dm:"
+# prefix; a bare session id passes through unchanged).
+SID="${HERMES_SESSION_KEY:-}"
+SID="${SID##*:}"
 
+# PINNED=true (display config exists) triggers the strip-and-inject
+# override below; FINAL_CDP is the endpoint to inject (empty when the
+# config has no cdp_url — strip still applies, nothing is injected).
+PINNED=false
 FINAL_CDP=""
-
-if [[ -n "${BROWSER_CDP_URL:-}" && "$BROWSER_CDP_URL" != "$SENTINEL" ]]; then
-    # Global real CDP URL set (e.g. CLI /browser connect) — use directly
-    FINAL_CDP="$BROWSER_CDP_URL"
-elif [[ "$BROWSER_CDP_URL" == "$SENTINEL" && -n "$SID" ]]; then
-    # Sentinel → resolve from SessionDisplay JSON
+if [[ -n "$SID" ]]; then
     JSON_FILE="${SESSIONS_DIR}/${SID}.json"
     if [[ -f "$JSON_FILE" ]]; then
+        PINNED=true
         FINAL_CDP=$(python3 -c "import json; print(json.load(open('$JSON_FILE')).get('cdp_url', ''))" 2>/dev/null || echo "")
     fi
 fi
 
-if [[ -n "$FINAL_CDP" ]]; then
-    # Rebuild argument list: inject --cdp, strip any existing --cdp / --session
+if [[ "$PINNED" == "true" ]]; then
+    # Rebuild argument list: strip any caller-supplied --cdp / --session
+    # (the session's desktop is the only attach target), then inject the
+    # config's endpoint when present.
     # (--cdp takes priority over --session in agent-browser >= 0.13)
     NEW_ARGS=()
     SKIP_NEXT=false
@@ -69,8 +80,12 @@ if [[ -n "$FINAL_CDP" ]]; then
                 ;;
         esac
     done
-    NEW_ARGS+=("--cdp" "$FINAL_CDP")
-    set -- "${NEW_ARGS[@]}"
+    if [[ -n "$FINAL_CDP" ]]; then
+        NEW_ARGS+=("--cdp" "$FINAL_CDP")
+    fi
+    if ((${#NEW_ARGS[@]})); then
+        set -- "${NEW_ARGS[@]}"
+    fi
 fi
 
 # ── Recursion guard ──────────────────────────────────────────────────────────
